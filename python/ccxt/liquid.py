@@ -43,6 +43,7 @@ class liquid (Exchange):
                     'https://developers.quoine.com/v2',
                 ],
                 'fees': 'https://help.liquid.com/getting-started-with-liquid/the-platform/fee-structure',
+                'referral': 'https://www.liquid.com?affiliate=SbzC62lt30976',
             },
             'api': {
                 'public': {
@@ -170,7 +171,7 @@ class liquid (Exchange):
             }
         return result
 
-    def fetch_markets(self):
+    def fetch_markets(self, params={}):
         markets = self.publicGetProducts()
         #
         #     [
@@ -599,7 +600,7 @@ class liquid (Exchange):
         url = self.urls['api'] + url
         return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
-    def handle_errors(self, code, reason, url, method, headers, body, response=None):
+    def handle_errors(self, code, reason, url, method, headers, body, response):
         if code >= 200 and code < 300:
             return
         exceptions = self.exceptions

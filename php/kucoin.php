@@ -519,7 +519,7 @@ class kucoin extends Exchange {
         );
     }
 
-    public function fetch_markets () {
+    public function fetch_markets ($params = array ()) {
         $response = $this->publicGetMarketOpenSymbols ();
         if ($this->options['adjustForTimeDifference'])
             $this->load_time_difference ();
@@ -692,9 +692,7 @@ class kucoin extends Exchange {
             $side = $order['type'];
         if ($side !== null)
             $side = strtolower ($side);
-        $orderId = $this->safe_string($order, 'orderOid');
-        if ($orderId === null)
-            $orderId = $this->safe_string($order, 'oid');
+        $orderId = $this->safe_string_2($order, 'orderOid', 'oid');
         // do not confuse $trades with orders
         $trades = null;
         if (is_array ($order) && array_key_exists ('dealOrders', $order))
@@ -1140,8 +1138,8 @@ class kucoin extends Exchange {
             } else if ($trade[1] === 'SELL') {
                 $side = 'sell';
             }
-            $price = $trade[2];
-            $amount = $trade[3];
+            $price = $this->safe_float($trade, 2);
+            $amount = $this->safe_float($trade, 3);
             $id = $trade[5];
         } else {
             $timestamp = $this->safe_value($trade, 'createdAt');
@@ -1357,7 +1355,7 @@ class kucoin extends Exchange {
         throw new ExchangeError ($this->id . ' => unknown $response => ' . $this->json ($response));
     }
 
-    public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response = null) {
+    public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response) {
         if ($response !== null) {
             // JS callchain parses $body beforehand
             $this->throw_exception_on_error($response);

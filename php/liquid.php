@@ -34,6 +34,7 @@ class liquid extends Exchange {
                     'https://developers.quoine.com/v2',
                 ),
                 'fees' => 'https://help.liquid.com/getting-started-with-liquid/the-platform/fee-structure',
+                'referral' => 'https://www.liquid.com?affiliate=SbzC62lt30976',
             ),
             'api' => array (
                 'public' => array (
@@ -164,7 +165,7 @@ class liquid extends Exchange {
         return $result;
     }
 
-    public function fetch_markets () {
+    public function fetch_markets ($params = array ()) {
         $markets = $this->publicGetProducts ();
         //
         //     array (
@@ -645,7 +646,7 @@ class liquid extends Exchange {
         return array ( 'url' => $url, 'method' => $method, 'body' => $body, 'headers' => $headers );
     }
 
-    public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response = null) {
+    public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response) {
         if ($code >= 200 && $code < 300)
             return;
         $exceptions = $this->exceptions;
