@@ -15,6 +15,7 @@ import hashlib
 import json
 from ccxt.base.errors import ExchangeError
 from ccxt.base.errors import AuthenticationError
+from ccxt.base.errors import ArgumentsRequired
 from ccxt.base.errors import InsufficientFunds
 from ccxt.base.errors import InvalidOrder
 from ccxt.base.errors import OrderNotFound
@@ -31,6 +32,7 @@ class exmo (Exchange):
             'countries': ['ES', 'RU'],  # Spain, Russia
             'rateLimit': 350,  # once every 350 ms ≈ 180 requests per minute ≈ 3 requests per second
             'version': 'v1',
+            'parseJsonResponse': False,
             'has': {
                 'CORS': False,
                 'fetchClosedOrders': 'emulated',
@@ -126,16 +128,7 @@ class exmo (Exchange):
         })
 
     async def fetch_trading_fees(self, params={}):
-        response = None
-        oldParseJsonResponse = self.parseJsonResponse
-        try:
-            self.parseJsonResponse = False
-            response = await self.webGetEnDocsFees(params)
-            self.parseJsonResponse = oldParseJsonResponse
-        except Exception as e:
-            # ensure parseJsonResponse is restored no matter what
-            self.parseJsonResponse = oldParseJsonResponse
-            raise e
+        response = await self.webGetEnDocsFees(params)
         parts = response.split('<td class="th_fees_2" colspan="2">')
         numParts = len(parts)
         if numParts != 2:
@@ -328,7 +321,7 @@ class exmo (Exchange):
             }
         return result
 
-    async def fetch_markets(self):
+    async def fetch_markets(self, params={}):
         fees = await self.fetch_trading_fees()
         markets = await self.publicGetPairSettings()
         keys = list(markets.keys())
@@ -518,12 +511,18 @@ class exmo (Exchange):
         return self.parse_trades(response[market['id']], market, since, limit)
 
     async def fetch_my_trades(self, symbol=None, since=None, limit=None, params={}):
+        # their docs does not mention it, but if you don't supply a symbol
+        # their API will return an empty response as if you don't have any trades
+        # therefore we make it required here as calling it without a symbol is useless
+        if symbol is None:
+            raise ArgumentsRequired(self.id + ' fetchMyTrades() requires a symbol argument')
         await self.load_markets()
-        request = {}
-        market = None
-        if symbol is not None:
-            market = self.market(symbol)
-            request['pair'] = market['id']
+        market = self.market(symbol)
+        request = {
+            'pair': market['id'],
+        }
+        if limit is not None:
+            request['limit'] = limit
         response = await self.privatePostUserTrades(self.extend(request, params))
         if market is not None:
             response = response[market['id']]
@@ -591,9 +590,9 @@ class exmo (Exchange):
         market = None
         if symbol is not None:
             market = self.market(symbol)
-        response = await self.privatePostOrderTrades({
+        response = await self.privatePostOrderTrades(self.extend({
             'order_id': str(id),
-        })
+        }, params))
         return self.parse_trades(response, market, since, limit)
 
     def update_cached_orders(self, openOrders, symbol):
@@ -854,6 +853,10 @@ class exmo (Exchange):
         if not self.fees['funding']['percentage']:
             key = 'withdraw' if (type == 'withdrawal') else 'deposit'
             feeCost = self.safe_float(self.options['fundingFees'][key], code)
+            # users don't pay for cashbacks, no fees for that
+            provider = self.safe_string(transaction, 'provider')
+            if provider == 'cashback':
+                feeCost = 0
             if feeCost is not None:
                 fee = {
                     'cost': feeCost,
@@ -939,7 +942,7 @@ class exmo (Exchange):
     def nonce(self):
         return self.milliseconds()
 
-    def handle_errors(self, httpCode, reason, url, method, headers, body):
+    def handle_errors(self, httpCode, reason, url, method, headers, body, response):
         if not isinstance(body, basestring):
             return  # fallback to default error handler
         if len(body) < 2:
@@ -971,3 +974,7 @@ class exmo (Exchange):
                         raise exceptions[code](feedback)
                     else:
                         raise ExchangeError(feedback)
+
+    async def request(self, path, api='public', method='GET', params={}, headers=None, body=None):
+        response = await self.fetch2(path, api, method, params, headers, body)
+        return self.parse_if_json_encoded_object(response)
