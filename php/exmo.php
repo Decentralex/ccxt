@@ -16,7 +16,6 @@ class exmo extends Exchange {
             'countries' => array ( 'ES', 'RU' ), // Spain, Russia
             'rateLimit' => 350, // once every 350 ms ≈ 180 requests per minute ≈ 3 requests per second
             'version' => 'v1',
-            'parseJsonResponse' => false,
             'has' => array (
                 'CORS' => false,
                 'fetchClosedOrders' => 'emulated',
@@ -247,6 +246,13 @@ class exmo extends Exchange {
                 }
             }
         }
+        // sets fiat fees to null
+        $fiatGroups = $this->to_array($this->omit ($groupsByGroup, 'crypto'));
+        for ($i = 0; $i < count ($fiatGroups); $i++) {
+            $code = $this->common_currency_code($this->safe_string($fiatGroups[$i], 'title'));
+            $withdraw[$code] = null;
+            $deposit[$code] = null;
+        }
         $result = array (
             'info' => $response,
             'withdraw' => $withdraw,
@@ -315,7 +321,7 @@ class exmo extends Exchange {
                         'max' => $this->safe_float($maxCosts, $code),
                     ),
                 ),
-                'info' => $fee,
+                'info' => $id,
             );
         }
         return $result;
@@ -930,6 +936,10 @@ class exmo extends Exchange {
                 $feeCost = 0;
             }
             if ($feeCost !== null) {
+                // withdrawal $amount includes the $fee
+                if ($type === 'withdrawal') {
+                    $amount = $amount - $feeCost;
+                }
                 $fee = array (
                     'cost' => $feeCost,
                     'currency' => $code,
@@ -1025,12 +1035,9 @@ class exmo extends Exchange {
     }
 
     public function handle_errors ($httpCode, $reason, $url, $method, $headers, $body, $response) {
-        if (gettype ($body) !== 'string')
-            return; // fallback to default error handler
-        if (strlen ($body) < 2)
+        if ($response === null)
             return; // fallback to default error handler
         if (($body[0] === '{') || ($body[0] === '[')) {
-            $response = json_decode ($body, $as_associative_array = true);
             if (is_array ($response) && array_key_exists ('result', $response)) {
                 //
                 //     array ("result":false,"error":"Error 50052 => Insufficient funds")
@@ -1062,10 +1069,5 @@ class exmo extends Exchange {
                 }
             }
         }
-    }
-
-    public function request ($path, $api = 'public', $method = 'GET', $params = array (), $headers = null, $body = null) {
-        $response = $this->fetch2 ($path, $api, $method, $params, $headers, $body);
-        return $this->parse_if_json_encoded_object($response);
     }
 }

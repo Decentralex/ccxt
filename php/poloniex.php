@@ -251,7 +251,7 @@ class poloniex extends Exchange {
                 'quoteId' => $quoteId,
                 'base' => $base,
                 'quote' => $quote,
-                'active' => true,
+                'active' => $market['isFrozen'] !== '1',
                 'precision' => $precision,
                 'limits' => array (
                     'amount' => array (
@@ -918,7 +918,7 @@ class poloniex extends Exchange {
         $this->load_markets();
         $year = 31104000; // 60 * 60 * 24 * 30 * 12 = one $year of history, why not
         $now = $this->seconds ();
-        $start = ($since !== null) ? intval ($since / 1000) : $now - $year;
+        $start = ($since !== null) ? intval ($since / 1000) : $now - 10 * $year;
         $request = array (
             'start' => $start, // UNIX timestamp, required
             'end' => $now, // UNIX timestamp, required
@@ -1073,11 +1073,14 @@ class poloniex extends Exchange {
         $amount = $this->safe_float($transaction, 'amount');
         $address = $this->safe_string($transaction, 'address');
         $feeCost = $this->safe_float($transaction, 'fee');
-        if ($feeCost === null) {
-            if ($type === 'deposit') {
+        if ($type === 'deposit') {
+            if ($feeCost === null) {
                 // according to https://poloniex.com/fees/
                 $feeCost = 0; // FIXME => remove hardcoded value that may change any time
             }
+        } else {
+            // poloniex withdrawal $amount includes the fee
+            $amount = $amount - $feeCost;
         }
         return array (
             'info' => $transaction,
@@ -1122,10 +1125,7 @@ class poloniex extends Exchange {
     }
 
     public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response) {
-        try {
-            $response = json_decode ($body, $as_associative_array = true);
-        } catch (Exception $e) {
-            // syntax error, resort to default error handler
+        if ($response === null) {
             return;
         }
         // array ("error":"Permission denied.")

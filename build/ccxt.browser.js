@@ -45,7 +45,7 @@ const Exchange  = require ('./js/base/Exchange')
 //-----------------------------------------------------------------------------
 // this is updated by vss.js when building
 
-const version = '1.18.61'
+const version = '1.18.119'
 
 Exchange.ccxtVersion = version
 
@@ -378,9 +378,13 @@ module.exports = class _1btcxe extends Exchange {
 
     async fetchTrades (symbol, since = undefined, limit = undefined, params = {}) {
         let market = this.market (symbol);
-        let response = await this.publicGetTransactions (this.extend ({
+        let request = {
             'currency': market['id'],
-        }, params));
+        };
+        if (limit !== undefined) {
+            request['limit'] = limit;
+        }
+        let response = await this.publicGetTransactions (this.extend (request, params));
         let trades = this.toArray (this.omit (response['transactions'], 'request_currency'));
         return this.parseTrades (trades, market, since, limit);
     }
@@ -892,7 +896,6 @@ module.exports = class acx extends Exchange {
 
     handleErrors (code, reason, url, method, headers, body, response) {
         if (code === 400) {
-            response = JSON.parse (body);
             const error = this.safeValue (response, 'error');
             const errorCode = this.safeString (error, 'code');
             const feedback = this.id + ' ' + this.json (response);
@@ -1512,7 +1515,6 @@ module.exports = class Exchange {
                     'deposit': {},
                 },
             },
-            'parseJsonResponse': true, // whether a reply is required to be in JSON or not
             'skipJsonOnStatusCodes': [], // array of http status codes which override requirement for JSON response
             'exceptions': undefined,
             'httpExceptions': {
@@ -1653,7 +1655,7 @@ module.exports = class Exchange {
         this.debug         = false
         this.journal       = 'debug.json'
         this.userAgent     = undefined
-        this.twofa         = false // two-factor authentication (2FA)
+        this.twofa         = undefined // two-factor authentication (2FA)
 
         this.apiKey        = undefined
         this.secret        = undefined
@@ -1737,10 +1739,15 @@ module.exports = class Exchange {
         return encodeURIComponent (...args)
     }
 
-    checkRequiredCredentials () {
+    checkRequiredCredentials (error = true) {
         Object.keys (this.requiredCredentials).forEach ((key) => {
-            if (this.requiredCredentials[key] && !this[key])
-                throw new AuthenticationError (this.id + ' requires `' + key + '`')
+            if (this.requiredCredentials[key] && !this[key]) {
+                if (error) {
+                    throw new AuthenticationError (this.id + ' requires `' + key + '`')
+                } else {
+                    return error
+                }
+            }
         })
     }
 
@@ -1885,10 +1892,14 @@ module.exports = class Exchange {
         return this.fetch2 (path, type, method, params, headers, body)
     }
 
-    parseJson (response, responseBody, url, method) {
+    parseJson (jsonString) {
+        return JSON.parse (jsonString)
+    }
+
+    parseRestResponse (response, responseBody, url, method) {
         try {
 
-            return (responseBody.length > 0) ? JSON.parse (responseBody) : {} // empty object for empty body
+            return (responseBody.length > 0) ? this.parseJson (responseBody) : {} // empty object for empty body
 
         } catch (e) {
 
@@ -1962,10 +1973,6 @@ module.exports = class Exchange {
         throw new error ([ this.id, method, url, code, reason, details ].join (' '))
     }
 
-    parseIfJsonEncodedObject (input) {
-        return (this.isJsonEncodedObject (input) ? JSON.parse (input) : input)
-    }
-
     isJsonEncodedObject (object) {
         return ((typeof object === 'string') &&
                 (object.length >= 2) &&
@@ -1985,8 +1992,8 @@ module.exports = class Exchange {
 
         return response.text ().then ((responseBody) => {
 
-            let jsonRequired = this.parseJsonResponse && !this.skipJsonOnStatusCodes.includes (response.status)
-            let json = jsonRequired ? this.parseJson (response, responseBody, url, method) : undefined
+            const shouldParseJson = this.isJsonEncodedObject (responseBody) && !this.skipJsonOnStatusCodes.includes (response.status)
+            const json = shouldParseJson ? this.parseRestResponse (response, responseBody, url, method) : undefined
 
             let responseHeaders = this.getResponseHeaders (response)
 
@@ -2009,7 +2016,7 @@ module.exports = class Exchange {
             this.handleErrors (...args)
             this.defaultErrorHandler (response, responseBody, url, method)
 
-            return jsonRequired ? json : responseBody
+            return json || responseBody
         })
     }
 
@@ -2777,8 +2784,86 @@ module.exports = class Exchange {
         ]);
     }
 
+    getZeroExOrderHashV2 (order) {
+        // https://github.com/0xProject/0x-monorepo/blob/development/python-packages/order_utils/src/zero_ex/order_utils/__init__.py
+        const addressPadding = '000000000000000000000000';
+        const header = '1901';
+        const domainStructHeader = '91ab3d17e3a50a9d89e63fd30b92be7f5336b03b287bb946787a83a9d62a2766f0f24618f4c4be1e62e026fb039a20ef96f4495294817d1027ffaa6d1f70e61ead7c5bef027816a800da1736444fb58a807ef4c9603b7848673f7e3a68eb14a5';
+        const orderSchemaHash = '770501f88a26ede5c04a20ef877969e961eb11fc13b78aaf414b633da0d4f86f';
+
+        const domainStructHash = ethAbi.soliditySHA3 (
+            [
+                'bytes',
+                'bytes',
+                'address'
+            ],
+            [
+                Buffer.from (domainStructHeader, 'hex'),
+                Buffer.from (addressPadding, 'hex'),
+                order['exchangeAddress']
+            ]
+        );
+        const orderStructHash = ethAbi.soliditySHA3 (
+            [
+                'bytes',
+                'bytes',
+                'address',
+                'bytes',
+                'address',
+                'bytes',
+                'address',
+                'bytes',
+                'address',
+                'uint256',
+                'uint256',
+                'uint256',
+                'uint256',
+                'uint256',
+                'uint256',
+                'string',
+                'string'
+            ],
+            [
+                Buffer.from (orderSchemaHash, 'hex'),
+                Buffer.from (addressPadding, 'hex'),
+                order['makerAddress'],
+                Buffer.from (addressPadding, 'hex'),
+                order['takerAddress'],
+                Buffer.from (addressPadding, 'hex'),
+                order['feeRecipientAddress'],
+                Buffer.from (addressPadding, 'hex'),
+                order['senderAddress'],
+                order['makerAssetAmount'],
+                order['takerAssetAmount'],
+                order['makerFee'],
+                order['takerFee'],
+                order['expirationTimeSeconds'],
+                order['salt'],
+                ethUtil.keccak (Buffer.from (order['makerAssetData'].slice(2), 'hex')),
+                ethUtil.keccak (Buffer.from (order['takerAssetData'].slice(2), 'hex')),
+            ]
+        );
+
+        return '0x' + ethUtil.keccak (
+            Buffer.concat ([
+                Buffer.from (header, 'hex'),
+                domainStructHash,
+                orderStructHash
+            ])
+        ).toString ('hex');
+    }
+
     signZeroExOrder (order, privateKey) {
         const orderHash = this.getZeroExOrderHash (order);
+        const signature = this.signMessage (orderHash, privateKey);
+        return this.extend (order, {
+            'orderHash': orderHash,
+            'ecSignature': signature, // todo fix v if needed
+        })
+    }
+
+    signZeroExOrderV2 (order, privateKey) {
+        const orderHash = this.getZeroExOrderHashV2 (order);
         const signature = this.signMessage (orderHash, privateKey);
         return this.extend (order, {
             'orderHash': orderHash,
@@ -2841,6 +2926,14 @@ module.exports = class Exchange {
     signMessage2 (message, privateKey) {
         // an alternative to signMessage using ethUtil (ethereumjs-util) instead of web3
         return this.signHash (this.hashMessage (message), privateKey.slice (-64))
+    }
+
+    oath (key) {
+        if (typeof this.twofa !== 'undefined') {
+            return this.totp (key)
+        } else {
+            throw new ExchangeError (this.id + ' this.twofa has not been set')
+        }
     }
 }
 
@@ -2989,7 +3082,7 @@ module.exports = unCamelCasePropertyNames (Object.assign ({}
 /*  ------------------------------------------------------------------------ */
 
 },{"./functions/crypto":12,"./functions/encode":13,"./functions/generic":14,"./functions/misc":15,"./functions/number":16,"./functions/platform":17,"./functions/string":18,"./functions/throttle":19,"./functions/time":20,"./functions/type":21}],12:[function(require,module,exports){
-"use strict";
+'use strict'
 
 /*  ------------------------------------------------------------------------ */
 
@@ -3027,11 +3120,48 @@ const jwt = function JSON_web_token (request, secret, alg = 'HS256', hash = 'sha
 
 /*  ------------------------------------------------------------------------ */
 
-module.exports = {
+const totp = (secret) => {
 
+    const dec2hex = s => ((s < 15.5 ? '0' : '') + Math.round (s).toString (16))
+        , hex2dec = s => parseInt (s, 16)
+        , leftpad = (s, p) => (p + s).slice (-p.length) // both s and p are short strings
+
+    const base32tohex = (base32) => {
+        let base32chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+        let bits = ''
+        let hex = ''
+        for (let i = 0; i < base32.length; i++) {
+            let val = base32chars.indexOf (base32.charAt (i).toUpperCase ())
+            bits += leftpad (val.toString (2), '00000')
+        }
+        for (let i = 0; i + 4 <= bits.length; i += 4) {
+            let chunk = bits.substr (i, 4)
+            hex = hex + parseInt (chunk, 2).toString (16)
+        }
+        return hex
+    }
+
+    const getOTP = (secret) => {
+        secret = secret.replace (' ', '') // support 2fa-secrets with spaces like "4TDV WOGO" → "4TDVWOGO"
+        let epoch = Math.round (new Date ().getTime () / 1000.0)
+        let time = leftpad (dec2hex (Math.floor (epoch / 30)), '0000000000000000')
+        let hmacRes = hmac (CryptoJS.enc.Hex.parse (time), CryptoJS.enc.Hex.parse (base32tohex (secret)), 'sha1', 'hex')
+        let offset = hex2dec (hmacRes.substring (hmacRes.length - 1))
+        let otp = (hex2dec (hmacRes.substr (offset * 2, 8)) & hex2dec ('7fffffff')) + ''
+        otp = (otp).substr (otp.length - 6, 6)
+        return otp
+    }
+    
+    return getOTP (secret)
+}
+
+/*  ------------------------------------------------------------------------ */
+
+module.exports = {
     hash,
     hmac,
-    jwt
+    jwt,
+    totp,
 }
 
 /*  ------------------------------------------------------------------------ */
@@ -4589,7 +4719,6 @@ module.exports = class bcex extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let code = this.safeValue (response, 'code');
             if (code !== undefined) {
                 if (code !== 0) {
@@ -4721,6 +4850,7 @@ module.exports = class bibox extends Exchange {
                 '2033': OrderNotFound, // operation failed! Orders have been completed or revoked
                 '2067': InvalidOrder, // Does not support market orders
                 '2068': InvalidOrder, // The number of orders can not be less than
+                '2085': InvalidOrder, // Order quantity is too small
                 '3012': AuthenticationError, // invalid apiKey
                 '3024': PermissionDenied, // wrong apikey permissions
                 '3025': AuthenticationError, // signature failed
@@ -5324,7 +5454,6 @@ module.exports = class bibox extends Exchange {
     handleErrors (code, reason, url, method, headers, body, response) {
         if (body.length > 0) {
             if (body[0] === '{') {
-                response = JSON.parse (body);
                 if ('error' in response) {
                     if ('code' in response['error']) {
                         let code = this.safeString (response['error'], 'code');
@@ -6019,7 +6148,6 @@ module.exports = class bigone extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             //
             //      {"errors":{"detail":"Internal server error"}}
             //      {"errors":[{"message":"invalid nonce, nonce should be a 19bits number","code":10030}],"data":null}
@@ -6324,7 +6452,10 @@ module.exports = class binance extends Exchange {
                 'timeDifference': 0, // the difference between system clock and Binance clock
                 'adjustForTimeDifference': false, // controls the adjustment logic upon instantiation
                 'parseOrderToPrecision': false, // force amounts and costs in parseOrder to precision
-                'newOrderRespType': 'RESULT', // 'ACK' for order id, 'RESULT' for full order or 'FULL' for order with fills
+                'newOrderRespType': {
+                    'market': 'FULL', // 'ACK' for order id, 'RESULT' for full order or 'FULL' for order with fills
+                    'limit': 'RESULT', // we change it from 'ACK' by default to 'RESULT'
+                },
             },
             'exceptions': {
                 '-1000': ExchangeNotAvailable, // {"code":-1000,"msg":"An unknown error occured while processing the request."}
@@ -6777,12 +6908,13 @@ module.exports = class binance extends Exchange {
             params = this.omit (params, 'test');
         }
         let uppercaseType = type.toUpperCase ();
+        const newOrderRespType = this.safeValue (this.options['newOrderRespType'], type, 'RESULT');
         let order = {
             'symbol': market['id'],
             'quantity': this.amountToPrecision (symbol, amount),
             'type': uppercaseType,
             'side': side.toUpperCase (),
-            'newOrderRespType': this.options['newOrderRespType'], // 'ACK' for order id, 'RESULT' for full order or 'FULL' for order with fills
+            'newOrderRespType': newOrderRespType, // 'ACK' for order id, 'RESULT' for full order or 'FULL' for order with fills
         };
         let timeInForceIsRequired = false;
         let priceIsRequired = false;
@@ -7218,7 +7350,6 @@ module.exports = class binance extends Exchange {
         }
         if (body.length > 0) {
             if (body[0] === '{') {
-                response = JSON.parse (body);
                 // check success value for wapi endpoints
                 // response in format {'msg': 'The coin does not exist.', 'success': true/false}
                 let success = this.safeValue (response, 'success', true);
@@ -7799,8 +7930,9 @@ module.exports = class bitbank extends Exchange {
         let price = this.safeFloat (trade, 'price');
         let amount = this.safeFloat (trade, 'amount');
         let symbol = market['symbol'];
-        let cost = this.costToPrecision (symbol, price * amount);
+        let cost = parseFloat (this.costToPrecision (symbol, price * amount));
         let id = this.safeString (trade, 'transaction_id');
+        let takerOrMaker = this.safeString (trade, 'maker_taker');
         if (!id) {
             id = this.safeString (trade, 'trade_id');
         }
@@ -7819,6 +7951,7 @@ module.exports = class bitbank extends Exchange {
             'order': this.safeString (trade, 'order_id'),
             'type': this.safeString (trade, 'type'),
             'side': trade['side'],
+            'takerOrMaker': takerOrMaker,
             'price': price,
             'amount': amount,
             'cost': cost,
@@ -8471,7 +8604,6 @@ module.exports = class bitbay extends Exchange {
         if (body.length < 2)
             return;
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             if ('code' in response) {
                 //
                 // bitbay returns the integer 'success': 1 key from their private API
@@ -9494,7 +9626,6 @@ module.exports = class bitfinex extends Exchange {
             return;
         if (code >= 400) {
             if (body[0] === '{') {
-                response = JSON.parse (body);
                 const feedback = this.id + ' ' + this.json (response);
                 let message = undefined;
                 if ('message' in response) {
@@ -9622,6 +9753,7 @@ module.exports = class bitfinex2 extends bitfinex {
                         'auth/r/orders/{symbol}/new',
                         'auth/r/orders/{symbol}/hist',
                         'auth/r/order/{symbol}:{id}/trades',
+                        'auth/r/trades/hist',
                         'auth/r/trades/{symbol}/hist',
                         'auth/r/positions',
                         'auth/r/funding/offers/{symbol}',
@@ -9633,6 +9765,7 @@ module.exports = class bitfinex2 extends bitfinex {
                         'auth/r/funding/trades/{symbol}/hist',
                         'auth/r/info/margin/{key}',
                         'auth/r/info/funding/{key}',
+                        'auth/r/movements/hist',
                         'auth/r/movements/{currency}/hist',
                         'auth/r/stats/perf:{timeframe}/hist',
                         'auth/r/alerts',
@@ -10998,7 +11131,6 @@ module.exports = class bitforex extends Exchange {
             return; // fallback to default error handler
         }
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let feedback = this.id + ' ' + body;
             let success = this.safeValue (response, 'success');
             if (success !== undefined) {
@@ -11242,7 +11374,8 @@ module.exports = class bithumb extends Exchange {
                 symbol = market['symbol'];
             }
             let ticker = tickers[id];
-            if (!Array.isArray (ticker)) {
+            let isArray = Array.isArray (ticker);
+            if (!isArray) {
                 ticker['date'] = timestamp;
                 result[symbol] = this.parseTicker (ticker, market);
             }
@@ -11400,7 +11533,6 @@ module.exports = class bithumb extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             if ('status' in response) {
                 //
                 //     {"status":"5100","message":"After May 23th, recent_transactions is no longer, hence users will not be able to connect to recent_transactions"}
@@ -12819,7 +12951,6 @@ module.exports = class bitmex extends Exchange {
         if (code >= 400) {
             if (body) {
                 if (body[0] === '{') {
-                    response = JSON.parse (body);
                     const error = this.safeValue (response, 'error', {});
                     const message = this.safeString (error, 'message');
                     const feedback = this.id + ' ' + body;
@@ -13326,7 +13457,6 @@ module.exports = class bitsane extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let statusCode = this.safeString (response, 'statusCode');
             if (statusCode !== undefined) {
                 if (statusCode !== '0') {
@@ -13828,7 +13958,6 @@ module.exports = class bitso extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             if ('success' in response) {
                 //
                 //     {"success":false,"error":{"code":104,"message":"Cannot perform request - nonce must be higher than 1520307203724237"}}
@@ -14765,7 +14894,6 @@ module.exports = class bitstamp extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             // fetchDepositAddress returns {"error": "No permission found"} on apiKeys that don't have the permission required
             let error = this.safeString (response, 'error');
             let exceptions = this.exceptions;
@@ -15992,7 +16120,6 @@ module.exports = class bittrex extends Exchange {
 
     handleErrors (code, reason, url, method, headers, body, response) {
         if (body[0] === '{') {
-            response = JSON.parse (body);
             // { success: false, message: "message" }
             let success = this.safeValue (response, 'success');
             if (success === undefined)
@@ -17114,7 +17241,6 @@ module.exports = class bitz extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let status = this.safeString (response, 'status');
             if (status !== undefined) {
                 const feedback = this.id + ' ' + body;
@@ -18586,7 +18712,6 @@ module.exports = class btcalpha extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let message = this.id + ' ' + this.safeValue (response, 'detail', body);
             if (code === 401 || code === 403) {
                 throw new AuthenticationError (message);
@@ -18911,7 +19036,6 @@ module.exports = class btcbox extends Exchange {
             return; // resort to defaultErrorHandler
         if (body[0] !== '{')
             return; // not json, resort to defaultErrorHandler
-        response = JSON.parse (body);
         const result = this.safeValue (response, 'result');
         if (result === undefined || result === true)
             return; // either public API (no error codes expected) or success
@@ -19789,7 +19913,6 @@ module.exports = class btcmarkets extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if (body[0] === '{') {
-            response = JSON.parse (body);
             if ('success' in response) {
                 if (!response['success']) {
                     let error = this.safeString (response, 'errorCode');
@@ -20761,7 +20884,7 @@ module.exports = class buda extends Exchange {
         let withdrawFees = {};
         let depositFees = {};
         let info = {};
-        if (typeof codes === 'undefined')
+        if (codes === undefined)
             codes = Object.keys (this.currencies);
         for (let i = 0; i < codes.length; i++) {
             let code = codes[i];
@@ -20784,7 +20907,7 @@ module.exports = class buda extends Exchange {
     }
 
     parseFundingFee (fee, type = undefined) {
-        if (typeof type === 'undefined')
+        if (type === undefined)
             type = fee['name'];
         if (type === 'withdrawal')
             type = 'withdraw';
@@ -20809,7 +20932,7 @@ module.exports = class buda extends Exchange {
     parseTicker (ticker, market = undefined) {
         let timestamp = this.milliseconds ();
         let symbol = undefined;
-        if (typeof market !== 'undefined')
+        if (market !== undefined)
             symbol = market['symbol'];
         let last = parseFloat (ticker['last_price'][0]);
         let percentage = parseFloat (ticker['price_variation_24h']);
@@ -20921,7 +21044,7 @@ module.exports = class buda extends Exchange {
     async fetchOHLCV (symbol, timeframe = '1m', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
         let market = this.market (symbol);
-        if (typeof since === 'undefined')
+        if (since === undefined)
             since = this.milliseconds () - 86400000;
         let request = {
             'symbol': market['id'],
@@ -20966,7 +21089,7 @@ module.exports = class buda extends Exchange {
     async fetchOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
         let market = undefined;
-        if (typeof symbol !== 'undefined')
+        if (symbol !== undefined)
             market = this.market (symbol);
         let response = await this.privateGetMarketsMarketOrders (this.extend ({
             'market': market['id'],
@@ -21045,7 +21168,7 @@ module.exports = class buda extends Exchange {
         let filled = parseFloat (order['traded_amount'][0]);
         let cost = parseFloat (order['total_exchanged'][0]);
         let price = order['limit'];
-        if (typeof price !== 'undefined')
+        if (price !== undefined)
             price = parseFloat (price[0]);
         if (cost > 0 && filled > 0)
             price = this.priceToPrecision (symbol, cost / filled);
@@ -21187,7 +21310,7 @@ module.exports = class buda extends Exchange {
 
     async fetchDeposits (code = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        if (typeof code === 'undefined')
+        if (code === undefined)
             throw new ExchangeError (this.name + ': fetchDeposits() requires a currency code argument');
         let currency = this.currency (code);
         let response = await this.privateGetCurrenciesCurrencyDeposits (this.extend ({
@@ -21200,7 +21323,7 @@ module.exports = class buda extends Exchange {
 
     async fetchWithdrawals (code = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        if (typeof code === 'undefined')
+        if (code === undefined)
             throw new ExchangeError (this.name + ': fetchDeposits() requires a currency code argument');
         let currency = this.currency (code);
         let response = await this.privateGetCurrenciesCurrencyWithdrawals (this.extend ({
@@ -21267,12 +21390,11 @@ module.exports = class buda extends Exchange {
             return; // fallback to default error handler
         }
         if (code >= 400) {
-            response = JSON.parse (body);
             let errorCode = this.safeString (response, 'code');
             let message = this.safeString (response, 'message', body);
             let feedback = this.name + ': ' + message;
             let exceptions = this.exceptions;
-            if (typeof errorCode !== 'undefined') {
+            if (errorCode !== undefined) {
                 if (errorCode in exceptions) {
                     throw new exceptions[errorCode] (feedback);
                 } else {
@@ -23413,7 +23535,6 @@ module.exports = class cobinhood extends Exchange {
         if (body[0] !== '{') {
             throw new ExchangeError (this.id + ' ' + body);
         }
-        response = JSON.parse (body);
         const feedback = this.id + ' ' + this.json (response);
         let errorCode = this.safeValue (response['error'], 'error_code');
         if (method === 'DELETE' || method === 'GET') {
@@ -24011,7 +24132,6 @@ module.exports = class coinbase extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let feedback = this.id + ' ' + body;
             //
             //    {"error": "invalid_request", "error_description": "The request is missing a required parameter, includes an unsupported parameter value, or is otherwise malformed."}
@@ -24881,7 +25001,6 @@ module.exports = class coinegg extends Exchange {
             return;
         if (body[0] !== '{')
             return;
-        response = JSON.parse (body);
         // private endpoints return the following structure:
         // {"result":true,"data":{...}} - success
         // {"result":false,"code":"103"} - failure
@@ -25584,6 +25703,7 @@ module.exports = class coinexchange extends Exchange {
             // new metainfo interface
             'has': {
                 'privateAPI': false,
+                'fetchBalance': false,
                 'createOrder': false,
                 'createMarketOrder': false,
                 'createLimitOrder': false,
@@ -26431,12 +26551,12 @@ module.exports = class coinfalcon extends Exchange {
     }
 
     async fetchTicker (symbol, params = {}) {
-        await this.loadMarkets ();
         let tickers = await this.fetchTickers (params);
         return tickers[symbol];
     }
 
     async fetchTickers (symbols = undefined, params = {}) {
+        await this.loadMarkets ();
         let response = await this.publicGetMarkets ();
         let tickers = response['data'];
         let result = {};
@@ -27015,15 +27135,7 @@ module.exports = class coingi extends Exchange {
     }
 
     async fetchMarkets (params = {}) {
-        let response = undefined;
-        try {
-            this.parseJsonResponse = false;
-            response = await this.wwwGet ();
-            this.parseJsonResponse = true;
-        } catch (e) {
-            this.parseJsonResponse = true;
-            throw e;
-        }
+        let response = await this.wwwGet ();
         let parts = response.split ('do=currencyPairSelector-selectCurrencyPair" class="active">');
         let currencyParts = parts[1].split ('<div class="currency-pair-label">');
         let result = [];
@@ -28644,7 +28756,6 @@ module.exports = class coinone extends Exchange {
 
     handleErrors (code, reason, url, method, headers, body, response) {
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             if ('result' in response) {
                 let result = response['result'];
                 if (result !== 'success') {
@@ -29707,7 +29818,6 @@ module.exports = class cointiger extends huobipro {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             if ('code' in response) {
                 //
                 //     { "code": "100005", "msg": "request sign illegal", "data": null }
@@ -30435,11 +30545,7 @@ module.exports = class coss extends Exchange {
         }
         let symbol = undefined;
         const marketId = this.safeString (trade, 'symbol');
-        if (marketId === undefined) {
-            if (market !== undefined) {
-                symbol = market['symbol'];
-            }
-        } else {
+        if (marketId !== undefined) {
             market = this.safeValue (this.markets_by_id, marketId, market);
             if (market === undefined) {
                 const [ baseId, quoteId ] = marketId.split ('_');
@@ -30447,6 +30553,8 @@ module.exports = class coss extends Exchange {
                 const quote = this.commonCurrencyCode (quoteId);
                 symbol = base + '/' + quote;
             }
+        } else if (market !== undefined) {
+            symbol = market['symbol'];
         }
         let cost = undefined;
         const price = this.safeFloat (trade, 'price');
@@ -30640,7 +30748,7 @@ module.exports = class coss extends Exchange {
             }
         } else {
             // a minor workaround for lowercase eth-btc symbols
-            marketId = marketId.toUppercase ();
+            marketId = marketId.toUpperCase ();
             marketId = marketId.replace ('-', '_');
             market = this.safeValue (this.markets_by_id, marketId, market);
             if (market === undefined) {
@@ -30648,6 +30756,8 @@ module.exports = class coss extends Exchange {
                 const base = this.commonCurrencyCode (baseId);
                 const quote = this.commonCurrencyCode (quoteId);
                 symbol = base + '/' + quote;
+            } else {
+                symbol = market['symbol'];
             }
         }
         const timestamp = this.safeInteger (order, 'createTime');
@@ -31970,7 +32080,6 @@ module.exports = class crex24 extends Exchange {
         if ((code >= 200) && (code < 300)) {
             return; // no error
         }
-        response = JSON.parse (body);
         const message = this.safeString (response, 'errorDescription');
         const feedback = this.id + ' ' + this.json (response);
         const exact = this.exceptions['exact'];
@@ -32406,7 +32515,6 @@ module.exports = class crypton extends Exchange {
 
     handleErrors (code, reason, url, method, headers, body, response) {
         if (body[0] === '{') {
-            response = JSON.parse (body);
             let success = this.safeValue (response, 'success');
             if (!success) {
                 throw new ExchangeError (this.id + ' ' + body);
@@ -32432,7 +32540,6 @@ module.exports = class cryptopia extends Exchange {
             'name': 'Cryptopia',
             'rateLimit': 1500,
             'countries': [ 'NZ' ], // New Zealand
-            'parseJsonResponse': false,
             'has': {
                 'CORS': false,
                 'createMarketOrder': false,
@@ -33291,58 +33398,36 @@ module.exports = class cryptopia extends Exchange {
     }
 
     handleErrors (code, reason, url, method, headers, body, response) {
-        if (typeof body !== 'string')
+        if (response === undefined) {
             return; // fallback to default error handler
-        if (body.length < 2)
-            return; // fallback to default error handler
-        const fixedJSONString = this.sanitizeBrokenJSONString (body);
-        if (fixedJSONString[0] === '{') {
-            let response = JSON.parse (fixedJSONString);
-            if ('Success' in response) {
-                const success = this.safeValue (response, 'Success');
-                if (success !== undefined) {
-                    if (!success) {
-                        let error = this.safeString (response, 'Error');
-                        let feedback = this.id;
-                        if (typeof error === 'string') {
-                            feedback = feedback + ' ' + error;
-                            if (error.indexOf ('Invalid trade amount') >= 0) {
-                                throw new InvalidOrder (feedback);
-                            }
-                            if (error.indexOf ('No matching trades found') >= 0) {
-                                throw new OrderNotFound (feedback);
-                            }
-                            if (error.indexOf ('does not exist') >= 0) {
-                                throw new OrderNotFound (feedback);
-                            }
-                            if (error.indexOf ('Insufficient Funds') >= 0) {
-                                throw new InsufficientFunds (feedback);
-                            }
-                            if (error.indexOf ('Nonce has already been used') >= 0) {
-                                throw new InvalidNonce (feedback);
-                            }
-                        } else {
-                            feedback = feedback + ' ' + fixedJSONString;
+        }
+        if ('Success' in response) {
+            const success = this.safeValue (response, 'Success');
+            if (success !== undefined) {
+                if (!success) {
+                    let error = this.safeString (response, 'Error');
+                    let feedback = this.id + ' ' + body;
+                    if (typeof error === 'string') {
+                        if (error.indexOf ('Invalid trade amount') >= 0) {
+                            throw new InvalidOrder (feedback);
                         }
-                        throw new ExchangeError (feedback);
+                        if (error.indexOf ('No matching trades found') >= 0) {
+                            throw new OrderNotFound (feedback);
+                        }
+                        if (error.indexOf ('does not exist') >= 0) {
+                            throw new OrderNotFound (feedback);
+                        }
+                        if (error.indexOf ('Insufficient Funds') >= 0) {
+                            throw new InsufficientFunds (feedback);
+                        }
+                        if (error.indexOf ('Nonce has already been used') >= 0) {
+                            throw new InvalidNonce (feedback);
+                        }
                     }
+                    throw new ExchangeError (feedback);
                 }
             }
         }
-    }
-
-    sanitizeBrokenJSONString (jsonString) {
-        // sometimes cryptopia will return a unicode symbol before actual JSON string.
-        const indexOfBracket = jsonString.indexOf ('{');
-        if (indexOfBracket >= 0) {
-            return jsonString.slice (indexOfBracket);
-        }
-        return jsonString;
-    }
-
-    async request (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        let response = await this.fetch2 (path, api, method, params, headers, body);
-        return this.parseIfJsonEncodedObject (this.sanitizeBrokenJSONString (response));
     }
 };
 
@@ -34164,7 +34249,7 @@ module.exports = class dsx extends liqui {
         let marketId = this.safeString (order, 'pair');
         market = this.safeValue (this.markets_by_id, marketId, market);
         let symbol = undefined;
-        if (typeof market !== 'undefined') {
+        if (market !== undefined) {
             symbol = market['symbol'];
         }
         let remaining = this.safeFloat (order, 'remainingVolume');
@@ -34172,8 +34257,8 @@ module.exports = class dsx extends liqui {
         let price = this.safeFloat (order, 'rate');
         let filled = undefined;
         let cost = undefined;
-        if (typeof amount !== 'undefined') {
-            if (typeof remaining !== 'undefined') {
+        if (amount !== undefined) {
+            if (remaining !== undefined) {
                 filled = amount - remaining;
                 cost = price * filled;
             }
@@ -34416,7 +34501,6 @@ module.exports = class exmo extends Exchange {
             'countries': [ 'ES', 'RU' ], // Spain, Russia
             'rateLimit': 350, // once every 350 ms ≈ 180 requests per minute ≈ 3 requests per second
             'version': 'v1',
-            'parseJsonResponse': false,
             'has': {
                 'CORS': false,
                 'fetchClosedOrders': 'emulated',
@@ -34647,6 +34731,13 @@ module.exports = class exmo extends Exchange {
                 }
             }
         }
+        // sets fiat fees to undefined
+        const fiatGroups = this.toArray (this.omit (groupsByGroup, 'crypto'));
+        for (let i = 0; i < fiatGroups.length; i++) {
+            const code = this.commonCurrencyCode (this.safeString (fiatGroups[i], 'title'));
+            withdraw[code] = undefined;
+            deposit[code] = undefined;
+        }
         const result = {
             'info': response,
             'withdraw': withdraw,
@@ -34715,7 +34806,7 @@ module.exports = class exmo extends Exchange {
                         'max': this.safeFloat (maxCosts, code),
                     },
                 },
-                'info': fee,
+                'info': id,
             };
         }
         return result;
@@ -35330,6 +35421,10 @@ module.exports = class exmo extends Exchange {
                 feeCost = 0;
             }
             if (feeCost !== undefined) {
+                // withdrawal amount includes the fee
+                if (type === 'withdrawal') {
+                    amount = amount - feeCost;
+                }
                 fee = {
                     'cost': feeCost,
                     'currency': code,
@@ -35425,12 +35520,9 @@ module.exports = class exmo extends Exchange {
     }
 
     handleErrors (httpCode, reason, url, method, headers, body, response) {
-        if (typeof body !== 'string')
-            return; // fallback to default error handler
-        if (body.length < 2)
+        if (response === undefined)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             if ('result' in response) {
                 //
                 //     {"result":false,"error":"Error 50052: Insufficient funds"}
@@ -35462,11 +35554,6 @@ module.exports = class exmo extends Exchange {
                 }
             }
         }
-    }
-
-    async request (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        let response = await this.fetch2 (path, api, method, params, headers, body);
-        return this.parseIfJsonEncodedObject (response);
     }
 };
 
@@ -35856,7 +35943,6 @@ module.exports = class exx extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             //
             //  {"result":false,"message":"服务端忙碌"}
             //  ... and other formats
@@ -36446,7 +36532,6 @@ module.exports = class fcoin extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let status = this.safeString (response, 'status');
             if (status !== '0') {
                 const feedback = this.id + ' ' + body;
@@ -37835,7 +37920,6 @@ module.exports = class gatecoin extends Exchange {
             throw new PermissionDenied (body);
         }
         if (body[0] === '{') {
-            response = JSON.parse (body);
             if ('responseStatus' in response) {
                 let errorCode = this.safeString (response['responseStatus'], 'errorCode');
                 let message = this.safeString (response['responseStatus'], 'message');
@@ -38126,12 +38210,11 @@ module.exports = class gateio extends Exchange {
         if (body[0] !== '{') {
             return;
         }
-        let jsonbodyParsed = JSON.parse (body);
-        let resultString = this.safeString (jsonbodyParsed, 'result', '');
+        let resultString = this.safeString (response, 'result', '');
         if (resultString !== 'false') {
             return;
         }
-        let errorCode = this.safeString (jsonbodyParsed, 'code');
+        let errorCode = this.safeString (response, 'code');
         if (errorCode !== undefined) {
             const exceptions = this.exceptions;
             const errorCodeNames = this.errorCodeNames;
@@ -38140,7 +38223,7 @@ module.exports = class gateio extends Exchange {
                 if (errorCode in errorCodeNames) {
                     message = errorCodeNames[errorCode];
                 } else {
-                    message = this.safeString (jsonbodyParsed, 'message', '(unknown)');
+                    message = this.safeString (response, 'message', '(unknown)');
                 }
                 throw new exceptions[errorCode] (message);
             }
@@ -38561,6 +38644,7 @@ module.exports = class gdax extends Exchange {
                         'users/self/trailing-volume',
                     ],
                     'post': [
+                        'conversions',
                         'deposits/coinbase-account',
                         'deposits/payment-method',
                         'coinbase-accounts/{id}/addresses',
@@ -38646,7 +38730,8 @@ module.exports = class gdax extends Exchange {
             if ((base === 'ETH') || (base === 'LTC')) {
                 taker = 0.003;
             }
-            let active = market['status'] === 'online';
+            const accessible = this.safeValue (market, 'accessible');
+            const active = (market['status'] === 'online') && accessible;
             result.push (this.extend (this.fees['trading'], {
                 'id': id,
                 'symbol': symbol,
@@ -39085,9 +39170,9 @@ module.exports = class gdax extends Exchange {
             return 'canceled';
         } else if ('completed_at' in transaction && transaction['completed_at']) {
             return 'ok';
-        } else if (('canceled_at' in transaction && !transaction['canceled_at']) && ('completed_at' in transaction && !transaction['completed_at']) && ('processed_at' in transaction && !transaction['processed_at'])) {
+        } else if ((('canceled_at' in transaction) && !transaction['canceled_at']) && (('completed_at' in transaction) && !transaction['completed_at']) && (('processed_at' in transaction) && !transaction['processed_at'])) {
             return 'pending';
-        } else if ('procesed_at' in transaction && transaction['procesed_at']) {
+        } else if ('processed_at' in transaction && transaction['processed_at']) {
             return 'pending';
         } else {
             return 'failed';
@@ -39201,7 +39286,6 @@ module.exports = class gdax extends Exchange {
     handleErrors (code, reason, url, method, headers, body, response) {
         if ((code === 400) || (code === 404)) {
             if (body[0] === '{') {
-                response = JSON.parse (body);
                 let message = response['message'];
                 let feedback = this.id + ' ' + message;
                 const exact = this.exceptions['exact'];
@@ -42117,7 +42201,6 @@ module.exports = class hitbtc2 extends hitbtc {
                 throw new ExchangeNotAvailable (feedback);
             // {"error":{"code":20002,"message":"Order not found","description":""}}
             if (body[0] === '{') {
-                response = JSON.parse (body);
                 if ('error' in response) {
                     const code = this.safeString (response['error'], 'code');
                     const exceptions = this.exceptions;
@@ -42266,6 +42349,7 @@ module.exports = class huobipro extends Exchange {
                 },
             },
             'exceptions': {
+                'gateway-internal-error': ExchangeNotAvailable, // {"status":"error","err-code":"gateway-internal-error","err-msg":"Failed to load data. Try again later.","data":null}
                 'account-frozen-balance-insufficient-error': InsufficientFunds, // {"status":"error","err-code":"account-frozen-balance-insufficient-error","err-msg":"trade account balance is not enough, left: `0.0027`","data":null}
                 'invalid-amount': InvalidOrder, // eg "Paramemter `amount` is invalid."
                 'order-limitorder-amount-min-error': InvalidOrder, // limit order amount error, min: `0.001`
@@ -42774,6 +42858,23 @@ module.exports = class huobipro extends Exchange {
             request['symbol'] = market['id'];
         }
         let response = await this.privateGetOrderOrders (this.extend (request, params));
+        //
+        //     { status:   "ok",
+        //         data: [ {                  id:  13997833014,
+        //                                symbol: "ethbtc",
+        //                          'account-id':  3398321,
+        //                                amount: "0.045000000000000000",
+        //                                 price: "0.034014000000000000",
+        //                          'created-at':  1545836976871,
+        //                                  type: "sell-limit",
+        //                        'field-amount': "0.045000000000000000",
+        //                   'field-cash-amount': "0.001530630000000000",
+        //                          'field-fees': "0.000003061260000000",
+        //                         'finished-at':  1545837948214,
+        //                                source: "spot-api",
+        //                                 state: "filled",
+        //                         'canceled-at':  0                      }  ] }
+        //
         return this.parseOrders (response['data'], market, since, limit);
     }
 
@@ -42809,6 +42910,37 @@ module.exports = class huobipro extends Exchange {
     }
 
     parseOrder (order, market = undefined) {
+        //
+        //     {                  id:  13997833014,
+        //                    symbol: "ethbtc",
+        //              'account-id':  3398321,
+        //                    amount: "0.045000000000000000",
+        //                     price: "0.034014000000000000",
+        //              'created-at':  1545836976871,
+        //                      type: "sell-limit",
+        //            'field-amount': "0.045000000000000000",
+        //       'field-cash-amount': "0.001530630000000000",
+        //              'field-fees': "0.000003061260000000",
+        //             'finished-at':  1545837948214,
+        //                    source: "spot-api",
+        //                     state: "filled",
+        //             'canceled-at':  0                      }
+        //
+        //     {                  id:  20395337822,
+        //                    symbol: "ethbtc",
+        //              'account-id':  5685075,
+        //                    amount: "0.001000000000000000",
+        //                     price: "0.0",
+        //              'created-at':  1545831584023,
+        //                      type: "buy-market",
+        //            'field-amount': "0.029100000000000000",
+        //       'field-cash-amount': "0.000999788700000000",
+        //              'field-fees': "0.000058200000000000",
+        //             'finished-at':  1545831584181,
+        //                    source: "spot-api",
+        //                     state: "filled",
+        //             'canceled-at':  0                      }
+        //
         let id = this.safeString (order, 'id');
         let side = undefined;
         let type = undefined;
@@ -42834,12 +42966,17 @@ module.exports = class huobipro extends Exchange {
         let timestamp = this.safeInteger (order, 'created-at');
         let amount = this.safeFloat (order, 'amount');
         let filled = this.safeFloat (order, 'field-amount'); // typo in their API, filled amount
+        if ((type === 'market') && (side === 'buy')) {
+            amount = (status === 'closed') ? filled : undefined;
+        }
         let price = this.safeFloat (order, 'price');
+        if (price === 0.0) {
+            price = undefined;
+        }
         let cost = this.safeFloat (order, 'field-cash-amount'); // same typo
         let remaining = undefined;
         let average = undefined;
         if (filled !== undefined) {
-            average = 0;
             if (amount !== undefined) {
                 remaining = amount - filled;
             }
@@ -42847,6 +42984,18 @@ module.exports = class huobipro extends Exchange {
             if ((cost !== undefined) && (filled > 0)) {
                 average = cost / filled;
             }
+        }
+        const feeCost = this.safeFloat (order, 'field-fees'); // typo in their API, filled fees
+        let fee = undefined;
+        if (feeCost !== undefined) {
+            let feeCurrency = undefined;
+            if (market !== undefined) {
+                feeCurrency = (side === 'sell') ? market['quote'] : market['base'];
+            }
+            fee = {
+                'cost': feeCost,
+                'currency': feeCurrency,
+            };
         }
         let result = {
             'info': order,
@@ -42864,7 +43013,7 @@ module.exports = class huobipro extends Exchange {
             'filled': filled,
             'remaining': remaining,
             'status': status,
-            'fee': undefined,
+            'fee': fee,
         };
         return result;
     }
@@ -42884,7 +43033,10 @@ module.exports = class huobipro extends Exchange {
                 if (price === undefined) {
                     throw new InvalidOrder (this.id + " market buy order requires price argument to calculate cost (total amount of quote currency to spend for buying, amount * price). To switch off this warning exception and specify cost in the amount argument, set .options['createMarketBuyOrderRequiresPrice'] = false. Make sure you know what you're doing.");
                 } else {
-                    request['amount'] = this.priceToPrecision (symbol, parseFloat (amount) * parseFloat (price));
+                    // despite that cost = amount * price is in quote currency and should have quote precision
+                    // the exchange API requires the cost supplied in 'amount' to be of base precision
+                    // more about it here: https://github.com/ccxt/ccxt/pull/4395
+                    request['amount'] = this.amountToPrecision (symbol, parseFloat (amount) * parseFloat (price));
                 }
             }
         }
@@ -43038,7 +43190,6 @@ module.exports = class huobipro extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             if ('status' in response) {
                 //
                 //     {"status":"error","err-code":"order-limitorder-amount-min-error","err-msg":"limit order amount error, min: `0.001`","data":null}
@@ -44337,9 +44488,6 @@ module.exports = class indodax extends Exchange {
         // { success: 0, error: "invalid order." }
         // or
         // [{ data, ... }, { ... }, ... ]
-        if (response === undefined)
-            if (body[0] === '{' || body[0] === '[')
-                response = JSON.parse (body);
         if (Array.isArray (response))
             return; // public endpoints may return []-arrays
         if (!('success' in response))
@@ -44669,7 +44817,8 @@ module.exports = class itbit extends Exchange {
             let auth = [ method, url, body, nonce, timestamp ];
             let message = nonce + this.json (auth).replace ('\\/', '/');
             let hash = this.hash (this.encode (message), 'sha256', 'binary');
-            let binhash = this.binaryConcat (url, hash);
+            let binaryUrl = this.stringToBinary (this.encode (url));
+            let binhash = this.binaryConcat (binaryUrl, hash);
             let signature = this.hmac (binhash, this.encode (this.secret), 'sha512', 'base64');
             headers = {
                 'Authorization': this.apiKey + ':' + signature,
@@ -45325,7 +45474,6 @@ module.exports = class kraken extends Exchange {
             'version': '0',
             'rateLimit': 3000,
             'certified': true,
-            'parseJsonResponse': false,
             'has': {
                 'createDepositAddress': true,
                 'fetchDepositAddress': true,
@@ -46050,6 +46198,17 @@ module.exports = class kraken extends Exchange {
         return market;
     }
 
+    parseOrderStatus (status) {
+        const statuses = {
+            'pending': 'open', // order pending book entry
+            'open': 'open',
+            'closed': 'closed',
+            'canceled': 'canceled',
+            'expired': 'expired',
+        };
+        return this.safeString (statuses, status, status);
+    }
+
     parseOrder (order, market = undefined) {
         let description = order['descr'];
         let side = description['type'];
@@ -46091,13 +46250,14 @@ module.exports = class kraken extends Exchange {
                 }
             }
         }
+        const status = this.parseOrderStatus (this.safeString (order, 'status'));
         return {
             'id': order['id'],
             'info': order,
             'timestamp': timestamp,
             'datetime': this.iso8601 (timestamp),
             'lastTradeTimestamp': undefined,
-            'status': order['status'],
+            'status': status,
             'symbol': symbol,
             'type': type,
             'side': side,
@@ -46469,7 +46629,7 @@ module.exports = class kraken extends Exchange {
 
     handleErrors (code, reason, url, method, headers, body, response) {
         if (code === 520) {
-            throw new ExchangeNotAvailable (this.id + ' ' + body);
+            throw new ExchangeNotAvailable (this.id + ' ' + code.toString () + ' ' + reason);
         }
         if (body.indexOf ('Invalid order') >= 0)
             throw new InvalidOrder (this.id + ' ' + body);
@@ -46482,7 +46642,6 @@ module.exports = class kraken extends Exchange {
         if (body.indexOf ('Invalid arguments:volume') >= 0)
             throw new InvalidOrder (this.id + ' ' + body);
         if (body[0] === '{') {
-            response = JSON.parse (body);
             if (typeof response !== 'string') {
                 if ('error' in response) {
                     let numErrors = response['error'].length;
@@ -46498,11 +46657,6 @@ module.exports = class kraken extends Exchange {
                 }
             }
         }
-    }
-
-    async request (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        let response = await this.fetch2 (path, api, method, params, headers, body);
-        return this.parseIfJsonEncodedObject (response);
     }
 };
 
@@ -46540,6 +46694,7 @@ module.exports = class kucoin extends Exchange {
                 'fetchMyTrades': 'emulated', // this method is to be deleted, see implementation and comments below
                 'fetchCurrencies': true,
                 'withdraw': true,
+                'fetchTransactions': true,
             },
             'timeframes': {
                 '1m': 1,
@@ -47091,6 +47246,100 @@ module.exports = class kucoin extends Exchange {
             'address': address,
             'tag': tag,
             'info': response,
+        };
+    }
+
+    async fetchTransactions (code = undefined, since = undefined, limit = undefined, params = {}) {
+        // https://kucoinapidocs.docs.apiary.io/#reference/0/assets-operation/list-deposit-&-withdrawal-records
+        if (code === undefined) {
+            throw new ArgumentsRequired (this.id + ' fetchDeposits requires a currency code argument');
+        }
+        await this.loadMarkets ();
+        const currency = this.currency (code);
+        const request = {
+            'coin': currency['id'],
+        };
+        const response = await this.privateGetAccountCoinWalletRecords (this.extend (request, params));
+        return this.parseTransactions (response['data']['datas'], currency, since, limit);
+    }
+
+    parseTransaction (transaction, currency = undefined) {
+        //
+        //     {
+        //         'coinType': 'ETH',
+        //         'createdAt': 1516134636000,
+        //         'amount': 2.5,
+        //         'address': '0x4cd00e7983e54add886442d3b866f95243cf9b30',
+        //         'fee': 0.0,
+        //         'outerWalletTxid': '0x820cde65b1fab0a9527a5c2466b3e7807fee45c6a81691486bf954114b12c873@0x4cd00e7983e54add886442d3b866f95243cf9b30@eth',
+        //         'remark': None,
+        //         'oid': '5a5e60ecaf2c5807eda65443',
+        //         'confirmation': 14,
+        //         'type': 'DEPOSIT',
+        //         'status': 'SUCCESS',
+        //         'updatedAt': 1516134827000
+        //     }
+        //
+        //     {
+        //         'coinType':'POLY',
+        //         'createdAt':1520696078000,
+        //         'amount':838.2247,
+        //         'address':'0x54fc433e95549e68fa362eb85c235177d94a8745',
+        //         'fee':3.0,
+        //         'outerWalletTxid':'0x055da84b7557498785d6acecf2b71d0158fec32fce246e51f5c49b79826a8481',
+        //         'remark':None,
+        //         'oid':'5aa3fb0d7bd394763bde55c1',
+        //         'confirmation':0,
+        //         'type':'WITHDRAW',
+        //         'status':'SUCCESS',
+        //         'updatedAt':1520696196000
+        //     }
+        //
+        const id = this.safeString (transaction, 'oid');
+        let txid = this.safeString (transaction, 'outerWalletTxid');
+        if (txid !== undefined) {
+            if (txid.indexOf ('@') >= 0) {
+                const parts = txid.split ('@');
+                txid = parts[0];
+            }
+        }
+        const timestamp = this.safeInteger (transaction, 'createdAt');
+        let code = undefined;
+        const currencyId = this.safeString (transaction, 'coinType');
+        currency = this.safeValue (this.currencies_by_id, currencyId);
+        if (currency !== undefined) {
+            code = currency['code'];
+        } else {
+            code = this.commonCurrencyCode (currencyId);
+        }
+        const address = this.safeString (transaction, 'address');
+        const tag = this.safeString (transaction, 'remark');
+        const amount = this.safeFloat (transaction, 'amount');
+        const status = this.safeString (transaction, 'status');
+        let type = this.safeString (transaction, 'type');
+        if (type !== undefined) {
+            // they return 'DEPOSIT' or 'WITHDRAW', ccxt used 'deposit' or 'withdrawal'
+            type = (type === 'DEPOSIT') ? 'deposit' : 'withdrawal';
+        }
+        const feeCost = this.safeFloat (transaction, 'fee');
+        const updated = this.safeInteger (transaction, 'updatedAt');
+        return {
+            'info': transaction,
+            'id': id,
+            'currency': code,
+            'amount': amount,
+            'address': address,
+            'tag': tag,
+            'status': status,
+            'type': type,
+            'updated': updated,
+            'txid': txid,
+            'timestamp': timestamp,
+            'datetime': this.iso8601 (timestamp),
+            'fee': {
+                'currency': code,
+                'cost': feeCost,
+            },
         };
     }
 
@@ -49649,7 +49898,6 @@ module.exports = class liqui extends Exchange {
     handleErrors (httpCode, reason, url, method, headers, body, response) {
         if (!this.isJsonEncodedObject (body))
             return; // fallback to default error handler
-        response = JSON.parse (body);
         if ('success' in response) {
             //
             // 1 - Liqui only returns the integer 'success' key from their private API
@@ -50366,11 +50614,8 @@ module.exports = class liquid extends Exchange {
         if (code === 429) {
             throw new DDoSProtection (this.id + ' ' + body);
         }
-        if (!this.isJsonEncodedObject (body)) {
-            return; // fallback to default error handler
-        }
         if (response === undefined) {
-            response = JSON.parse (body);
+            return;
         }
         const feedback = this.id + ' ' + body;
         const message = this.safeString (response, 'message');
@@ -50915,7 +51160,7 @@ module.exports = class livecoin extends Exchange {
             let order = rawOrders[i];
             result.push (this.parseOrder (order, market));
         }
-        return result;
+        return this.sortBy (result, 'timestamp');
     }
 
     async fetchOpenOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
@@ -51054,7 +51299,6 @@ module.exports = class livecoin extends Exchange {
         if (typeof body !== 'string')
             return;
         if (body[0] === '{') {
-            response = JSON.parse (body);
             if (code >= 300) {
                 let errorCode = this.safeString (response, 'errorCode');
                 if (errorCode in this.exceptions) {
@@ -54060,7 +54304,6 @@ module.exports = class okcoinusd extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if (body[0] === '{') {
-            response = JSON.parse (body);
             if ('error_code' in response) {
                 let error = this.safeString (response, 'error_code');
                 let message = this.id + ' ' + this.json (response);
@@ -54666,7 +54909,7 @@ module.exports = class poloniex extends Exchange {
                 'quoteId': quoteId,
                 'base': base,
                 'quote': quote,
-                'active': true,
+                'active': market['isFrozen'] !== '1',
                 'precision': precision,
                 'limits': {
                     'amount': {
@@ -55333,7 +55576,7 @@ module.exports = class poloniex extends Exchange {
         await this.loadMarkets ();
         const year = 31104000; // 60 * 60 * 24 * 30 * 12 = one year of history, why not
         const now = this.seconds ();
-        let start = (since !== undefined) ? parseInt (since / 1000) : now - year;
+        let start = (since !== undefined) ? parseInt (since / 1000) : now - 10 * year;
         let request = {
             'start': start, // UNIX timestamp, required
             'end': now, // UNIX timestamp, required
@@ -55485,14 +55728,17 @@ module.exports = class poloniex extends Exchange {
         }
         const id = this.safeString (transaction, 'withdrawalNumber');
         const type = (id !== undefined) ? 'withdrawal' : 'deposit';
-        const amount = this.safeFloat (transaction, 'amount');
+        let amount = this.safeFloat (transaction, 'amount');
         const address = this.safeString (transaction, 'address');
         let feeCost = this.safeFloat (transaction, 'fee');
-        if (feeCost === undefined) {
-            if (type === 'deposit') {
+        if (type === 'deposit') {
+            if (feeCost === undefined) {
                 // according to https://poloniex.com/fees/
                 feeCost = 0; // FIXME: remove hardcoded value that may change any time
             }
+        } else {
+            // poloniex withdrawal amount includes the fee
+            amount = amount - feeCost;
         }
         return {
             'info': transaction,
@@ -55537,10 +55783,7 @@ module.exports = class poloniex extends Exchange {
     }
 
     handleErrors (code, reason, url, method, headers, body, response) {
-        try {
-            response = JSON.parse (body);
-        } catch (e) {
-            // syntax error, resort to default error handler
+        if (response === undefined) {
             return;
         }
         // {"error":"Permission denied."}
@@ -55602,6 +55845,7 @@ module.exports = class quadrigacx extends Exchange {
                 'fetchTickers': true,
                 'fetchOrder': true,
                 'fetchMyTrades': true,
+                'fetchTransactions': true,
                 'CORS': true,
                 'withdraw': true,
             },
@@ -55696,6 +55940,77 @@ module.exports = class quadrigacx extends Exchange {
         let response = await this.privatePostUserTransactions (this.extend (request, params));
         let trades = this.filterBy (response, 'type', 2);
         return this.parseTrades (trades, market, since, limit);
+    }
+
+    async fetchTransactions (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        let market = undefined;
+        let request = {};
+        if (symbol !== undefined) {
+            market = this.market (symbol);
+            request['book'] = market['id'];
+        }
+        if (limit !== undefined) {
+            request['limit'] = limit;
+        }
+        let response = await this.privatePostUserTransactions (this.extend (request, params));
+        let user_transactions = this.filterByArray (response, 'type', [0, 1], false);
+        // return user_transactions;
+        return this.parseTransactions (user_transactions, market, since, limit);
+    }
+
+    parseTransaction (transaction, currency = undefined) {
+        //
+        //     {
+        //         "btc":"0.99985260",
+        //         "method":"Bitcoin",
+        //         "fee":"0.00000000",
+        //         "type":0,
+        //         "datetime":"2018-10-08 05:26:23"
+        //     }
+        //
+        //     {
+        //         "btc":"-0.50000000",
+        //         "method":"Bitcoin",
+        //         "fee":"0.00000000",
+        //         "type":1,
+        //         "datetime":"2018-08-27 13:50:10"
+        //     }
+        //
+        let code = undefined;
+        let amount = undefined;
+        let omitted = this.omit (transaction, [ 'datetime', 'type', 'method', 'fee' ]);
+        let keys = Object.keys (omitted);
+        for (let i = 0; i < keys.length; i++) {
+            if (keys[i] in this.currencies_by_id) {
+                code = keys[i];
+            }
+        }
+        if (code !== undefined) {
+            amount = this.safeString (transaction, code);
+        }
+        let timestamp = this.parse8601 (this.safeString (transaction, 'datetime'));
+        let status = 'ok';
+        const fee = this.safeFloat (transaction, 'fee');
+        let type = this.safeInteger (transaction, 'type');
+        type = (type === 1) ? 'withdrawal' : 'deposit';
+        return {
+            'info': transaction,
+            'id': undefined,
+            'txid': undefined,
+            'timestamp': timestamp,
+            'datetime': this.iso8601 (timestamp),
+            'address': undefined,
+            'tag': undefined,
+            'type': type,
+            'amount': amount,
+            'currency': code,
+            'status': status,
+            'updated': undefined,
+            'fee': {
+                'currency': code,
+                'cost': fee,
+            },
+        };
     }
 
     async fetchOrder (id, symbol = undefined, params = {}) {
@@ -56076,7 +56391,6 @@ module.exports = class quadrigacx extends Exchange {
         if (body.length < 2)
             return;
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let error = this.safeValue (response, 'error');
             if (error !== undefined) {
                 //
@@ -56757,7 +57071,7 @@ module.exports = class rightbtc extends Exchange {
     async fetchOrders (symbol = undefined, since = undefined, limit = undefined, params = {}) {
         let ids = this.safeString (params, 'ids');
         if ((symbol === undefined) || (ids === undefined)) {
-            throw new ExchangeError (this.id + " fetchOrders requires a 'symbol' argument and an extra 'ids' parameter. The 'ids' should be an array or a string of one or more order ids separated with slashes."); // eslint-disable-line quotes
+            throw new ArgumentsRequired (this.id + " fetchOrders requires a 'symbol' argument and an extra 'ids' parameter. The 'ids' should be an array or a string of one or more order ids separated with slashes."); // eslint-disable-line quotes
         }
         if (Array.isArray (ids)) {
             ids = ids.join ('/');
@@ -56864,7 +57178,6 @@ module.exports = class rightbtc extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             let status = this.safeValue (response, 'status');
             if (status !== undefined) {
                 //
@@ -57274,7 +57587,6 @@ module.exports = class theocean extends Exchange {
             'rateLimit': 3000,
             'version': 'v0',
             'certified': true,
-            'parseJsonResponse': false,
             'requiresWeb3': true,
             // add GET https://api.staging.theocean.trade/api/v0/candlesticks/intervals to fetchMarkets
             'timeframes': {
@@ -58505,7 +58817,6 @@ module.exports = class theocean extends Exchange {
             throw new AuthenticationError (this.id + ' ' + body);
         }
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             const message = this.safeString (response, 'message');
             if (message !== undefined) {
                 //
@@ -58528,17 +58839,6 @@ module.exports = class theocean extends Exchange {
                 throw new ExchangeError (feedback); // unknown message
             }
         }
-    }
-
-    async request (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
-        let response = await this.fetch2 (path, api, method, params, headers, body);
-        if (typeof response !== 'string') {
-            throw new ExchangeError (this.id + ' returned a non-string response: ' + response.toString ());
-        }
-        if ((response[0] === '{' || response[0] === '[')) {
-            return JSON.parse (response);
-        }
-        return response;
     }
 };
 
@@ -59504,7 +59804,6 @@ module.exports = class tidebit extends Exchange {
 
     handleErrors (code, reason, url, method, headers, body, response) {
         if (code === 400) {
-            response = JSON.parse (body);
             const error = this.safeValue (response, 'error');
             const errorCode = this.safeString (error, 'code');
             const feedback = this.id + ' ' + this.json (response);
@@ -60881,7 +61180,6 @@ module.exports = class uex extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if ((body[0] === '{') || (body[0] === '[')) {
-            response = JSON.parse (body);
             //
             // {"code":"0","msg":"suc","data":{}}
             //
@@ -62112,7 +62410,7 @@ module.exports = class upbit extends Exchange {
         };
         let market = undefined;
         if (symbol !== undefined) {
-            market = this.marketId (symbol);
+            market = this.market (symbol);
             request['market'] = market['id'];
         }
         const response = await this.privateGetOrders (this.extend (request, params));
@@ -62375,9 +62673,8 @@ module.exports = class upbit extends Exchange {
     }
 
     handleErrors (httpCode, reason, url, method, headers, body, response) {
-        if (!this.isJsonEncodedObject (body))
+        if (response === undefined)
             return; // fallback to default error handler
-        response = JSON.parse (body);
         //
         //   { 'error': { 'message': "Missing request parameter error. Check the required parameters!", 'name':  400 } },
         //   { 'error': { 'message': "side is missing, side does not have a valid value", 'name': "validation_error" } },
@@ -62913,13 +63210,13 @@ module.exports = class virwox extends Exchange {
 
     async fetchTrades (symbol, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets ();
-        let market = this.market (symbol);
-        let response = await this.publicGetGetRawTradeData (this.extend ({
+        const market = this.market (symbol);
+        const response = await this.publicGetGetRawTradeData (this.extend ({
             'instrument': symbol,
             'timespan': 3600,
         }, params));
-        let result = response['result'];
-        let trades = result['data'];
+        const result = this.safeValue (response, 'result', {});
+        const trades = this.safeValue (result, 'data', []);
         return this.parseTrades (trades, market);
     }
 
@@ -62975,7 +63272,6 @@ module.exports = class virwox extends Exchange {
     handleErrors (code, reason, url, method, headers, body, response) {
         if (code === 200) {
             if ((body[0] === '{') || (body[0] === '[')) {
-                response = JSON.parse (body);
                 if ('result' in response) {
                     let result = response['result'];
                     if ('errorCode' in result) {
@@ -63135,7 +63431,6 @@ module.exports = class wex extends liqui {
                 // response is not JSON -> resort to default error handler
                 return;
             }
-            response = JSON.parse (body);
             if ('success' in response) {
                 if (!response['success']) {
                     const error = this.safeString (response, 'error');
@@ -63783,7 +64078,6 @@ module.exports = class yobit extends liqui {
 
     handleErrors (code, reason, url, method, headers, body, response) {
         if (body[0] === '{') {
-            response = JSON.parse (body);
             if ('success' in response) {
                 if (!response['success']) {
                     if ('error_log' in response) {
@@ -64302,9 +64596,9 @@ module.exports = class zaif extends Exchange {
     }
 
     handleErrors (httpCode, reason, url, method, headers, body, response) {
-        if (!this.isJsonEncodedObject (body))
-            return; // fallback to default error handler
-        response = JSON.parse (body);
+        if (response === undefined) {
+            return;
+        }
         //
         //     {"error": "unsupported currency_pair"}
         //
@@ -64924,7 +65218,6 @@ module.exports = class zb extends Exchange {
         if (body.length < 2)
             return; // fallback to default error handler
         if (body[0] === '{') {
-            response = JSON.parse (body);
             let feedback = this.id + ' ' + this.json (response);
             if ('code' in response) {
                 let code = this.safeString (response, 'code');
