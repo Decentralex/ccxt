@@ -12,7 +12,6 @@ try:
 except NameError:
     basestring = str  # Python 2
 import hashlib
-import json
 from ccxt.base.errors import ExchangeError
 from ccxt.base.errors import AuthenticationError
 from ccxt.base.errors import ArgumentsRequired
@@ -32,7 +31,6 @@ class exmo (Exchange):
             'countries': ['ES', 'RU'],  # Spain, Russia
             'rateLimit': 350,  # once every 350 ms ≈ 180 requests per minute ≈ 3 requests per second
             'version': 'v1',
-            'parseJsonResponse': False,
             'has': {
                 'CORS': False,
                 'fetchClosedOrders': 'emulated',
@@ -251,6 +249,12 @@ class exmo (Exchange):
             if depositFee is not None:
                 if len(depositFee) > 0:
                     deposit[code] = self.parse_fixed_float_value(depositFee)
+        # sets fiat fees to None
+        fiatGroups = self.to_array(self.omit(groupsByGroup, 'crypto'))
+        for i in range(0, len(fiatGroups)):
+            code = self.common_currency_code(self.safe_string(fiatGroups[i], 'title'))
+            withdraw[code] = None
+            deposit[code] = None
         result = {
             'info': response,
             'withdraw': withdraw,
@@ -317,7 +321,7 @@ class exmo (Exchange):
                         'max': self.safe_float(maxCosts, code),
                     },
                 },
-                'info': fee,
+                'info': id,
             }
         return result
 
@@ -858,6 +862,9 @@ class exmo (Exchange):
             if provider == 'cashback':
                 feeCost = 0
             if feeCost is not None:
+                # withdrawal amount includes the fee
+                if type == 'withdrawal':
+                    amount = amount - feeCost
                 fee = {
                     'cost': feeCost,
                     'currency': code,
@@ -943,12 +950,9 @@ class exmo (Exchange):
         return self.milliseconds()
 
     def handle_errors(self, httpCode, reason, url, method, headers, body, response):
-        if not isinstance(body, basestring):
-            return  # fallback to default error handler
-        if len(body) < 2:
+        if response is None:
             return  # fallback to default error handler
         if (body[0] == '{') or (body[0] == '['):
-            response = json.loads(body)
             if 'result' in response:
                 #
                 #     {"result":false,"error":"Error 50052: Insufficient funds"}
@@ -974,7 +978,3 @@ class exmo (Exchange):
                         raise exceptions[code](feedback)
                     else:
                         raise ExchangeError(feedback)
-
-    async def request(self, path, api='public', method='GET', params={}, headers=None, body=None):
-        response = await self.fetch2(path, api, method, params, headers, body)
-        return self.parse_if_json_encoded_object(response)

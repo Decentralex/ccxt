@@ -34,7 +34,7 @@ use kornrunner\Eth;
 use kornrunner\Secp256k1;
 use kornrunner\Solidity;
 
-$version = '1.18.61';
+$version = '1.18.119';
 
 // rounding mode
 const TRUNCATE = 0;
@@ -50,7 +50,7 @@ const PAD_WITH_ZERO = 1;
 
 class Exchange {
 
-    const VERSION = '1.18.61';
+    const VERSION = '1.18.119';
 
     public static $eth_units = array (
         'wei'        => '1',
@@ -574,7 +574,7 @@ class Exchange {
         $timestamp = (int) $timestamp;
         if ($timestamp < 0)
             return null;
-        $result = date ('c', (int) round ($timestamp / 1000));
+        $result = date ('c', (int) floor ($timestamp / 1000));
         $msec = (int) $timestamp % 1000;
         $result = str_replace ('+00:00', sprintf (".%03dZ", $msec), $result);
         return $result;
@@ -636,18 +636,6 @@ class Exchange {
         return json_encode ($data, $flags);
     }
 
-    public static function parse_if_json_encoded_object ($input) {
-        if ((gettype ($input) !== 'string') || (strlen ($input) < 2)) {
-            return $input;
-        }
-        if ($input[0] === '{') {
-            return json_decode ($input, $as_associative_array = true);
-        } else if ($input[1] === '[') {
-            return json_decode ($input);
-        }
-        return $input;
-    }
-
     public static function is_json_encoded_object ($input) {
         return (gettype ($input) === 'string') &&
                 (strlen ($input) >= 2) &&
@@ -666,11 +654,15 @@ class Exchange {
         return $this->seconds ();
     }
 
-    public function check_required_credentials () {
+    public function check_required_credentials ($error = true) {
         $keys = array_keys ($this->requiredCredentials);
         foreach ($this->requiredCredentials as $key => $value) {
             if ($value && (!$this->$key)) {
-                throw new AuthenticationError ($this->id . ' requires `' . $key . '`');
+                if ($error) {
+                    throw new AuthenticationError ($this->id . ' requires `' . $key . '`');
+                } else {
+                    return $error;
+                }
             }
         }
     }
@@ -795,7 +787,7 @@ class Exchange {
         $this->privateKey    = '';
         $this->walletAddress = '';
 
-        $this->twofa         = false;
+        $this->twofa         = null;
         $this->marketsById   = null;
         $this->markets_by_id = null;
         $this->currencies_by_id = null;
@@ -807,7 +799,6 @@ class Exchange {
         $this->minFundingAddressLength = 1; // used in check_address
         $this->substituteCommonCurrencyCodes = true;
         $this->timeframes = null;
-        $this->parseJsonResponse = true;
 
         $this->requiredCredentials = array (
             'apiKey' => true,
@@ -953,7 +944,7 @@ class Exchange {
         throw new NotSupported ($this->id . ' camelcase() not implemented yet');
     }
 
-    public function hash ($request, $type = 'md5', $digest = 'hex') {
+    public static function hash ($request, $type = 'md5', $digest = 'hex') {
         $base64 = ($digest === 'base64');
         $binary = ($digest === 'binary');
         $hash = hash ($type, $request, ($binary || $base64) ? true : false);
@@ -962,7 +953,7 @@ class Exchange {
         return $hash;
     }
 
-    public function hmac ($request, $secret, $type = 'sha256', $digest = 'hex') {
+    public static function hmac ($request, $secret, $type = 'sha256', $digest = 'hex') {
         $base64 = ($digest === 'base64');
         $binary = ($digest === 'binary');
         $hmac = hash_hmac ($type, $request, $secret, ($binary || $base64) ? true : false);
@@ -1029,6 +1020,10 @@ class Exchange {
 
     public function handle_errors ($code, $reason, $url, $method, $headers, $body, $response) {
         // it's a stub function, does nothing in base code
+    }
+
+    public function parse_json ($json_string) {
+        return json_decode ($json_string, $as_associative_array = true);
     }
 
     public function fetch ($url, $method = 'GET', $headers = null, $body = null) {
@@ -1167,11 +1162,9 @@ class Exchange {
 
         $json_response = null;
 
-        if ($this->parseJsonResponse) {
-
-            $json_response =
-                ((gettype ($result) == 'string') &&  (strlen ($result) > 1)) ?
-                    json_decode ($result, $as_associative_array = true) : null;
+        if ($this->is_json_encoded_object ($result)) {
+         
+            $json_response = $this->parse_json ($result, $as_associative_array = true);
 
             if ($this->enableLastJsonResponse) {
                 $this->last_json_response = $json_response;
@@ -1219,14 +1212,14 @@ class Exchange {
                         'DDoS protection',
                         'rate-limiting in effect',
                     )) . ')';
-                    $this->raise_error ($error_class, $url, $method, $http_status_code, $result, $details);
                 }
+                $this->raise_error ($error_class, $url, $method, $http_status_code, $result, $details);
             } else {
                 $this->raise_error ($error_class, $url, $method, $http_status_code, $result);
             }
         }
 
-        if ($this->parseJsonResponse && !$json_response) {
+        if (!$json_response) {
 
             if (preg_match ('#offline|busy|retry|wait|unavailable|maintain|maintenance|maintenancing#i', $result)) {
 
@@ -1247,7 +1240,7 @@ class Exchange {
             }
         }
 
-        return $this->parseJsonResponse ? $json_response : $result;
+        return $json_response ? $json_response : $result;
     }
 
     public function set_markets ($markets, $currencies = null) {
@@ -2389,4 +2382,40 @@ class Exchange {
         return $this->signHash ($this->hashMessage ($message), $privateKey);
     }
 
+    public function oath () {
+        if ($this->twofa) {
+            return $this->totp ($this->twofa);
+        } else {
+            throw new ExchangeError ($this->id . ' requires a non-empty value in $this->twofa property');
+        }
+    }
+
+    public static function totp ($key) {
+        function base32_decode($s){
+            static $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+            $tmp = '';
+            foreach (str_split($s) as $c) {
+                if (false === ($v = strpos($alphabet, $c))) {
+                    $v = 0;
+                }
+                $tmp .= sprintf('%05b', $v);
+            }
+            $args = array_map('bindec', str_split($tmp, 8));
+            array_unshift($args, 'C*');
+            return rtrim(call_user_func_array('pack', $args), "\0");
+        }
+        $noSpaceKey = str_replace (' ', '', $key);
+        $encodedKey = base32_decode($noSpaceKey);
+        $epoch = floor (time() / 30);
+        $encodedEpoch = pack ('J', $epoch);
+        $hmacResult = static::hmac($encodedEpoch, $encodedKey,"sha1", "hex");
+        $hmac = [];
+        foreach (str_split($hmacResult, 2) as $hex) {
+            $hmac[] = hexdec($hex);
+        }
+        $offset = $hmac[count($hmac) - 1] & 0xF;
+        $code = ($hmac[$offset + 0] & 0x7F) << 24 | ($hmac[$offset + 1] & 0xFF) << 16 | ($hmac[$offset + 2] & 0xFF) << 8 | ($hmac[$offset + 3] & 0xFF);
+        $otp = $code % pow(10, 6);
+        return str_pad((string) $otp, 6, '0', STR_PAD_LEFT);
+    }
 }
