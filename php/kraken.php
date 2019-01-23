@@ -936,8 +936,14 @@ class kraken extends Exchange {
     }
 
     public function parse_transaction_status ($status) {
+        // IFEX transaction states
         $statuses = array (
+            'Initial' => 'pending',
+            'Pending' => 'pending',
             'Success' => 'ok',
+            'Settled' => 'ok',
+            'Failure' => 'failed',
+            'Partial' => 'ok',
         );
         return $this->safe_string($statuses, $status, $status);
     }
@@ -989,6 +995,11 @@ class kraken extends Exchange {
         $status = $this->parse_transaction_status ($this->safe_string($transaction, 'status'));
         $type = $this->safe_string($transaction, 'type'); // injected from the outside
         $feeCost = $this->safe_float($transaction, 'fee');
+        if ($feeCost === null) {
+            if ($type === 'deposit') {
+                $feeCost = 0;
+            }
+        }
         return array (
             'info' => $transaction,
             'id' => $id,

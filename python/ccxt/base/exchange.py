@@ -4,7 +4,7 @@
 
 # -----------------------------------------------------------------------------
 
-__version__ = '1.18.119'
+__version__ = '1.18.144'
 
 # -----------------------------------------------------------------------------
 
@@ -153,6 +153,7 @@ class Exchange(object):
         '521': ExchangeNotAvailable,
         '522': ExchangeNotAvailable,
         '525': ExchangeNotAvailable,
+        '526': ExchangeNotAvailable,
         '400': ExchangeNotAvailable,
         '403': ExchangeNotAvailable,
         '405': ExchangeNotAvailable,
@@ -1496,8 +1497,12 @@ class Exchange(object):
     # -------------------------------------------------------------------------
     # web3 / 0x methods
 
+    @staticmethod
+    def has_web3():
+        return Web3 is not None
+
     def check_required_dependencies(self):
-        if Web3 is None:
+        if not Exchange.has_web3():
             raise NotSupported("Web3 functionality requires Python3 and web3 package installed: https://github.com/ethereum/web3.py")
 
     def eth_decimals(self, unit='ether'):

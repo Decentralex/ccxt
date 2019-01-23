@@ -888,8 +888,14 @@ class kraken (Exchange):
         return response['result']
 
     def parse_transaction_status(self, status):
+        # IFEX transaction states
         statuses = {
+            'Initial': 'pending',
+            'Pending': 'pending',
             'Success': 'ok',
+            'Settled': 'ok',
+            'Failure': 'failed',
+            'Partial': 'ok',
         }
         return self.safe_string(statuses, status, status)
 
@@ -938,6 +944,9 @@ class kraken (Exchange):
         status = self.parse_transaction_status(self.safe_string(transaction, 'status'))
         type = self.safe_string(transaction, 'type')  # injected from the outside
         feeCost = self.safe_float(transaction, 'fee')
+        if feeCost is None:
+            if type == 'deposit':
+                feeCost = 0
         return {
             'info': transaction,
             'id': id,
